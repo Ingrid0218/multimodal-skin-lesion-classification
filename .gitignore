@@ -1,0 +1,19 @@
+# 排除編譯與暫存檔
+**/__pycache__/
+*.pyc
+
+# 排除權重與日誌資料夾
+weights/
+logs/
+
+# 排除所有的訓練圖片檔 (防止大量小檔案上傳)
+*.jpg
+*.png
+
+melanoma_external_256/train/
+
+!melanoma_external_256/train.csv
+
+# 排除訓練模型權重檔
+*.pth
+*.ckpt

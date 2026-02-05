@@ -1,0 +1,34 @@
+name: melanoma_pytorch_env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - libstdcxx-ng >=12         
+  - python=3.10
+  - pip
+  - spyder
+  - spyder-kernels
+  - jupyter
+  - numpy<2.0.0
+  - pandas
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - tqdm
+  - pillow
+  - openpyxl
+  - opencv
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - torchaudio=2.5.1
+  - pytorch-cuda=12.1
+  - pip:
+      - albumentations
+      - efficientnet-pytorch==0.7.1
+      - transformers
+      - datasets
+      - accelerate
+      - wandb
+      - git+https://github.com/ildoonet/pytorch-gradual-warmup-lr.git
