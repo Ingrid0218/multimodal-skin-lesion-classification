@@ -5,7 +5,6 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - libstdcxx-ng >=12         
   - python=3.10
   - pip
   - spyder
