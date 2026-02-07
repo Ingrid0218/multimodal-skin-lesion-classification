@@ -24,7 +24,7 @@ git config --global user.email "Email"</br>
 
 找到資料夾中 **pytorch_conda.yml** 檔案，確認有內容後回到annaconda prompt 輸入</br>
 > conda env create -f pytorch_conda.yml</br>
->conda activate <環境名稱></br>
+>conda activate melanoma_pytorch_env</br>
 
 然後驗證是否有安裝好cuda(事前請先更新顯卡驅動)</br>
 
