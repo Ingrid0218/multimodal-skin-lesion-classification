@@ -54,7 +54,7 @@ def get_transforms(image_size):
         albumentations.VerticalFlip(p=0.5),
         albumentations.HorizontalFlip(p=0.5),
         albumentations.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.75),
-        albumentations.RandomContrast(p=0.75),
+        albumentations.AutoContrast(p=0.75),   
         albumentations.OneOf([
             albumentations.MotionBlur(blur_limit=5),
             albumentations.MedianBlur(blur_limit=5),
