@@ -22,9 +22,7 @@ git config --global user.email "Email"</br>
 開啟command line 用cd指令(舉例來說，要切換到桌面，輸入 cd C:\Users\使用者名稱\desktop)切換到你要的資料夾，輸入</br>
 > git clone https://github.com/thefirstwangry/multimodal-skin-lesion-classification.git</br>
 
-找到資料夾中 **pytorch_conda.yml** 檔案，確認有內容後回到annaconda prompt 輸入</br>
-> conda env create -f pytorch_conda.yml</br>
->conda activate melanoma_pytorch_env</br>
+
 
 然後驗證是否有安裝好cuda(事前請先更新顯卡驅動)</br>
 
