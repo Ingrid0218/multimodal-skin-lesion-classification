@@ -15,7 +15,7 @@ from sklearn.model_selection import train_test_split
 from dataset import get_df, get_transforms, MelanomaDataset
 from focal_loss.focal_loss import FocalLoss
 from models import Effnet_Melanoma
-
+from sklearn.metrics import classification_report
 '''
 model setting area
 '''
@@ -114,7 +114,7 @@ def get_trans(img, I):
         return img.flip(2).flip(3)
 
 
-def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
+def val_epoch(model, loader, mel_idx, n_test=1, get_output=False, save_report_path=None):
     model.eval()
     val_loss = []
     LOGITS = []
@@ -122,7 +122,6 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
     TARGETS = []
     with torch.no_grad():
         for (data, target) in tqdm(loader):
-            
             if args.use_meta:
                 data, meta = data
                 data, meta, target = data.to(device), meta.to(device), target.to(device)
@@ -140,6 +139,7 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
                     l = model(get_trans(data, I))
                     logits += l
                     probs += l.softmax(1)
+            
             logits /= n_test
             probs /= n_test
 
@@ -154,17 +154,28 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
     LOGITS = torch.cat(LOGITS).numpy()
     PROBS = torch.cat(PROBS).numpy()
     TARGETS = torch.cat(TARGETS).numpy()
+    
+    # 計算預測類別
+    PREDS = PROBS.argmax(1)
+
+    # --- 生成 Classification Report ---
+    report_dict = classification_report(TARGETS, PREDS, digits=6, output_dict=True, zero_division=0)
+    report_df = pd.DataFrame(report_dict).transpose()
+    
+    if save_report_path:
+        report_df.to_csv(save_report_path, index=True)
+        print(f"\n[Classification Report Saved] --> {save_report_path}")
 
     if get_output:
-        return LOGITS, PROBS
+        return LOGITS, PROBS, TARGETS, PREDS
     else:
-        acc = (PROBS.argmax(1) == TARGETS).mean() * 100.
+        acc = (PREDS == TARGETS).mean() * 100.
         auc = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
         return val_loss, acc, auc
 
 
 def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, transforms_val, mel_idx):
-
+    # ... (前面的 DataLoader 與 Model 初始化保持不變) ...
     dataset_train = MelanomaDataset(df_train, 'train', meta_features, transform=transforms_train)
     dataset_valid = MelanomaDataset(df_valid, 'valid', meta_features, transform=transforms_val)
     train_loader = torch.utils.data.DataLoader(
@@ -178,8 +189,7 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         n_meta_features=n_meta_features,
         n_meta_dim=[int(nd) for nd in args.n_meta_dim.split(',')],
         out_dim=args.out_dim
-    )
-    model = model.to(device)
+    ).to(device)
 
     auc_max = 0.
     model_file  = os.path.join(args.model_dir, f'{args.save_name}_best.pth')
@@ -188,30 +198,30 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     optimizer = optim.Adam(model.parameters(), lr=args.init_lr)
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)
-    
-    print(len(dataset_train), len(dataset_valid))
 
     for epoch in range(1, args.n_epochs + 1):
         print(time.ctime(), f'Epoch {epoch}')
-
         train_loss = train_epoch(model, train_loader, optimizer)
         val_loss, acc, auc = val_epoch(model, valid_loader, mel_idx)
 
-        content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f}.'
+        content = f'{time.ctime()} Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {val_loss:.5f}, acc: {acc:.4f}, auc: {auc:.6f}.'
         print(content)
         with open(os.path.join(args.log_dir, f'log_{args.save_name}.txt'), 'a') as appender:
             appender.write(content + '\n')
 
         scheduler_warmup.step()    
-        if epoch==2: scheduler_warmup.step() # bug workaround   
+        if epoch==2: scheduler_warmup.step()
 
         if auc > auc_max:
-            print('auc_max ({:.6f} --> {:.6f}). Saving model ...'.format(auc_max, auc))
+            print(f'auc_max ({auc_max:.6f} --> {auc:.6f}). Saving model & report...')
             torch.save(model.state_dict(), model_file)
             auc_max = auc
+            
+            # --- 每次 AUC 創新高就輸出報表 ---
+            report_path = os.path.join(args.log_dir, f'report_{args.save_name}_best.csv')
+            val_epoch(model, valid_loader, mel_idx, save_report_path=report_path)
 
     torch.save(model.state_dict(), model_file2)
-
 
 def main():
 

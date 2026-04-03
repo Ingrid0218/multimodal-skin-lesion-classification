@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import classification_report
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,6 +36,7 @@ def parse_args():
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
     parser.add_argument('--n-meta-dim', type=str, default='512,128')
 
+    parser.add_argument('--n-test', type=int, default=1) # 新增這一行
     args, _ = parser.parse_known_args()
     return args
 
@@ -110,7 +112,7 @@ def get_trans(img, I):
         return img.flip(2).flip(3)
 
 
-def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
+def val_epoch(model, loader, mel_idx, n_test=1, get_output=False, save_report_path=None):
     model.eval()
     val_loss = []
     LOGITS = []
@@ -151,10 +153,20 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
     PROBS = torch.cat(PROBS).numpy()
     TARGETS = torch.cat(TARGETS).numpy()
 
+    PREDS = PROBS.argmax(1)
+
+    report_dict = classification_report(TARGETS, PREDS, digits=6, output_dict=True, zero_division=0)
+    report_df = pd.DataFrame(report_dict).transpose()
+
+    if save_report_path:    
+        report_df.to_csv(save_report_path, index=True)
+        print(f"\n[REPORT_SAVED] --> {save_report_path}")
+        print(report_df)
+
     if get_output:
-        return LOGITS, PROBS
+        return LOGITS, PROBS, TARGETS, PREDS
     else:
-        acc = (PROBS.argmax(1) == TARGETS).mean() * 100.
+        acc = (PREDS == TARGETS).mean() * 100.
         auc = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
         return val_loss, acc, auc
 
@@ -205,7 +217,18 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
             print('auc_max ({:.6f} --> {:.6f}). Saving model ...'.format(auc_max, auc))
             torch.save(model.state_dict(), model_file)
             auc_max = auc
-
+            report_filename = os.path.join(args.log_dir, f'report_{args.save_name}_best.csv')
+            val_epoch(model, valid_loader, mel_idx, n_test=args.n_test, save_report_path=report_filename)
+            _, probs, targets, preds = val_epoch(model, valid_loader, mel_idx, n_test=args.n_test, get_output=True)
+            df_res = pd.DataFrame({
+            'target': targets,
+            'prediction': preds,
+            'prob_class_0': probs[:, 0],
+            'prob_class_1': probs[:, 1]
+            })
+# 如果你想對應回原始檔名，可以直接結合 df_valid
+            df_detail = pd.concat([df_valid.reset_index(drop=True), df_res], axis=1)
+            df_detail.to_csv(os.path.join(args.log_dir, f'detail_{args.save_name}_best.csv'), index=False)
     torch.save(model.state_dict(), model_file2)
 
 
