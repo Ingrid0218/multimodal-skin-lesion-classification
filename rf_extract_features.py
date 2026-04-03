@@ -5,8 +5,8 @@ import pandas as pd
 from tqdm import tqdm
 import argparse
 from sklearn.model_selection import train_test_split
-from dataset import get_df, get_transforms, MelanomaDataset
-from models import Effnet_Melanoma
+from rf_dataset import get_df, get_transforms, MelanomaDataset
+from rf_models import Effnet_Melanoma
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -88,7 +88,6 @@ def main():
     np.save('y_train.npy', y_train)
     np.save('X_valid_features.npy', X_valid)
     np.save('y_valid.npy', y_valid)
-    print("太棒了！特徵提取完畢，已成功儲存 4 個 .npy 檔案。")
 
 if __name__ == '__main__':
     main()
