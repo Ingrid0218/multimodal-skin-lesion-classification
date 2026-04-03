@@ -1,6 +1,7 @@
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score, classification_report
+from sklearn import svm
 
 print("載入特徵中...")
 X_train = np.load('X_train_features.npy')
