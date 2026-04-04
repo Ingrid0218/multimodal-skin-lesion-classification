@@ -147,7 +147,8 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False, save_report_pa
             PROBS.append(probs.detach().cpu())
             TARGETS.append(target.detach().cpu())
 
-            loss = criterion(logits, target)
+            val_probs_for_loss = torch.softmax(logits, dim=-1)
+            loss = criterion(val_probs_for_loss, target)
             val_loss.append(loss.detach().cpu().numpy())
 
     val_loss = np.mean(val_loss)
