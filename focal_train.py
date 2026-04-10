@@ -114,14 +114,13 @@ def get_trans(img, I):
         return img.flip(2).flip(3)
 
 
-def val_epoch(model, loader, mel_idx, n_test=1, get_output=False, save_report_path=None):
+def val_epoch(model, loader, mel_idx, n_test=1):
     model.eval()
     val_loss = []
-    LOGITS = []
     PROBS = []
     TARGETS = []
     with torch.no_grad():
-        for (data, target) in tqdm(loader):
+        for (data, target) in tqdm(loader, desc="Validating"):
             if args.use_meta:
                 data, meta = data
                 data, meta, target = data.to(device), meta.to(device), target.to(device)
@@ -143,40 +142,32 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False, save_report_pa
             logits /= n_test
             probs /= n_test
 
-            LOGITS.append(logits.detach().cpu())
             PROBS.append(probs.detach().cpu())
             TARGETS.append(target.detach().cpu())
 
-            val_probs_for_loss = torch.softmax(logits, dim=-1)
-            loss = criterion(val_probs_for_loss, target)
+            # [Focal Loss 修正] 直接傳入計算好且平均過的 0~1 機率值 (probs)
+            loss = criterion(probs, target)
             val_loss.append(loss.detach().cpu().numpy())
 
     val_loss = np.mean(val_loss)
-    LOGITS = torch.cat(LOGITS).numpy()
     PROBS = torch.cat(PROBS).numpy()
     TARGETS = torch.cat(TARGETS).numpy()
     
     # 計算預測類別
     PREDS = PROBS.argmax(1)
 
-    # --- 生成 Classification Report ---
-    report_dict = classification_report(TARGETS, PREDS, digits=6, output_dict=True, zero_division=0)
-    report_df = pd.DataFrame(report_dict).transpose()
+    acc = (PREDS == TARGETS).mean() * 100.
+    auc = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
     
-    if save_report_path:
-        report_df.to_csv(save_report_path, index=True)
-        print(f"\n[Classification Report Saved] --> {save_report_path}")
+    # 產生純文字格式的 Report
+    report_str = classification_report(TARGETS, PREDS, digits=4, zero_division=0)
 
-    if get_output:
-        return LOGITS, PROBS, TARGETS, PREDS
-    else:
-        acc = (PREDS == TARGETS).mean() * 100.
-        auc = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
-        return val_loss, acc, auc
+    # 一次性回傳所有需要的資訊
+    return val_loss, acc, auc, report_str, TARGETS, PREDS
 
 
 def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, transforms_val, mel_idx):
-    # ... (前面的 DataLoader 與 Model 初始化保持不變) ...
+    # 初始化資料集
     dataset_train = MelanomaDataset(df_train, 'train', meta_features, transform=transforms_train)
     dataset_valid = MelanomaDataset(df_valid, 'valid', meta_features, transform=transforms_val)
     train_loader = torch.utils.data.DataLoader(
@@ -185,6 +176,7 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     valid_loader = torch.utils.data.DataLoader(
         dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
 
+    # 初始化模型
     model = Effnet_Melanoma(
         args.enet_type,
         n_meta_features=n_meta_features,
@@ -200,30 +192,48 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)
 
+    print(f"Train Size: {len(dataset_train)} | Valid Size: {len(dataset_valid)}")
+
     for epoch in range(1, args.n_epochs + 1):
         print(time.ctime(), f'Epoch {epoch}')
+        
+        # 訓練與驗證 (精簡為只呼叫一次 val_epoch)
         train_loss = train_epoch(model, train_loader, optimizer)
-        val_loss, acc, auc = val_epoch(model, valid_loader, mel_idx)
+        val_loss, acc, auc, report_str, targets, preds = val_epoch(model, valid_loader, mel_idx, n_test=args.n_test)
 
-        content = f'{time.ctime()} Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {val_loss:.5f}, acc: {acc:.4f}, auc: {auc:.6f}.'
+        # 整理要輸出的綜合報告字串
+        content = f"\n[{time.ctime()}] Epoch {epoch}\n"
+        content += f"LR: {optimizer.param_groups[0]['lr']:.7f} | Train Loss: {train_loss:.5f} | Valid Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {auc:.6f}\n"
+        content += "Classification Report:\n"
+        content += report_str + "\n"
+        content += "="*60
+        
         print(content)
-        with open(os.path.join(args.log_dir, f'log_{args.save_name}.txt'), 'a') as appender:
+        
+        # 將每一次的紀錄附加寫入 txt 檔案中
+        log_txt_path = os.path.join(args.log_dir, f'Full_Report_{args.save_name}.txt')
+        with open(log_txt_path, 'a') as appender:
             appender.write(content + '\n')
 
         scheduler_warmup.step()    
         if epoch==2: scheduler_warmup.step()
 
         if auc > auc_max:
-            print(f'auc_max ({auc_max:.6f} --> {auc:.6f}). Saving model & report...')
+            print(f'auc_max ({auc_max:.6f} --> {auc:.6f}). Saving model & detail CSV...')
             torch.save(model.state_dict(), model_file)
             auc_max = auc
             
-            # --- 每次 AUC 創新高就輸出報表 ---
-            report_path = os.path.join(args.log_dir, f'report_{args.save_name}_best.csv')
-            val_epoch(model, valid_loader, mel_idx, save_report_path=report_path)
+            # --- 處理精簡版 detail CSV 輸出 ---
+            id_col = df_valid.columns[0] # 自動抓取影像名稱或 ID 的欄位
+            df_detail = pd.DataFrame({
+                'ID': df_valid[id_col].values,
+                'Actual': targets,
+                'Prediction': preds
+            })
+            df_detail.to_csv(os.path.join(args.log_dir, f'detail_{args.save_name}_best.csv'), index=False)
 
     torch.save(model.state_dict(), model_file2)
-
+    
 def main():
 
     df_train, df_test, meta_features, n_meta_features, mel_idx = get_df(
