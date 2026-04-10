@@ -14,6 +14,7 @@ from warmup_scheduler import GradualWarmupScheduler
 from sklearn.model_selection import train_test_split
 from dataset import get_df, get_transforms, MelanomaDataset
 from models import Effnet_Melanoma
+from sklearn.metrics import classification_report
 
 '''
 model setting area
@@ -122,16 +123,13 @@ def get_trans(img, I):
     elif I % 4 == 3:
         return img.flip(2).flip(3)
 
-
-def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
+def val_epoch(model, loader, mel_idx, n_test=1):
     model.eval()
     val_loss = []
-    LOGITS = []
     PROBS = []
     TARGETS = []
     with torch.no_grad():
-        for (data, target) in tqdm(loader):
-            
+        for (data, target) in tqdm(loader, desc="Validating"):
             if args.use_meta:
                 data, meta = data
                 data, meta, target = data.to(device), meta.to(device), target.to(device)
@@ -149,10 +147,10 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
                     l = model(get_trans(data, I))
                     logits += l
                     probs += l.softmax(1)
+            
             logits /= n_test
             probs /= n_test
 
-            LOGITS.append(logits.detach().cpu())
             PROBS.append(probs.detach().cpu())
             TARGETS.append(target.detach().cpu())
 
@@ -160,20 +158,22 @@ def val_epoch(model, loader, mel_idx, n_test=1, get_output=False):
             val_loss.append(loss.detach().cpu().numpy())
 
     val_loss = np.mean(val_loss)
-    LOGITS = torch.cat(LOGITS).numpy()
     PROBS = torch.cat(PROBS).numpy()
     TARGETS = torch.cat(TARGETS).numpy()
+    
+    # 計算預測類別
+    PREDS = PROBS.argmax(1)
 
-    if get_output:
-        return LOGITS, PROBS
-    else:
-        acc = (PROBS.argmax(1) == TARGETS).mean() * 100.
-        auc = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
-        return val_loss, acc, auc
+    acc = (PREDS == TARGETS).mean() * 100.
+    auc = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
+    
+    # 產生純文字格式的 Report
+    report_str = classification_report(TARGETS, PREDS, digits=4, zero_division=0)
 
+    # 一次性回傳所有需要的資訊
+    return val_loss, acc, auc, report_str, TARGETS, PREDS
 
 def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, transforms_val, mel_idx):
-
     dataset_train = MelanomaDataset(df_train, 'train', meta_features, transform=transforms_train)
     dataset_valid = MelanomaDataset(df_valid, 'valid', meta_features, transform=transforms_val)
     train_loader = torch.utils.data.DataLoader(
@@ -187,8 +187,7 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         n_meta_features=n_meta_features,
         n_meta_dim=[int(nd) for nd in args.n_meta_dim.split(',')],
         out_dim=args.out_dim
-    )
-    model = model.to(device)
+    ).to(device)
 
     auc_max = 0.
     model_file  = os.path.join(args.model_dir, f'{args.save_name}_best.pth')
@@ -198,29 +197,47 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)
     
-    print(len(dataset_train), len(dataset_valid))
+    print(f"Train Size: {len(dataset_train)} | Valid Size: {len(dataset_valid)}")
 
     for epoch in range(1, args.n_epochs + 1):
         print(time.ctime(), f'Epoch {epoch}')
-
         train_loss = train_epoch(model, train_loader, optimizer)
-        val_loss, acc, auc = val_epoch(model, valid_loader, mel_idx)
+        
+        # 執行驗證並獲取所有回傳值
+        val_loss, acc, auc, report_str, targets, preds = val_epoch(model, valid_loader, mel_idx, n_test=args.n_test)
 
-        content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, train loss: {train_loss:.5f}, valid loss: {(val_loss):.5f}, acc: {(acc):.4f}, auc: {(auc):.6f}.'
+        # 整理要輸出的綜合報告字串
+        content = f"\n[{time.ctime()}] Epoch {epoch}\n"
+        content += f"LR: {optimizer.param_groups[0]['lr']:.7f} | Train Loss: {train_loss:.5f} | Valid Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {auc:.6f}\n"
+        content += "Classification Report:\n"
+        content += report_str + "\n"
+        content += "="*60 
+        
         print(content)
-        with open(os.path.join(args.log_dir, f'log_{args.save_name}.txt'), 'a') as appender:
+        
+        # 將紀錄附加寫入 txt 檔案中
+        log_txt_path = os.path.join(args.log_dir, f'Full_Report_{args.save_name}.txt')
+        with open(log_txt_path, 'a') as appender:
             appender.write(content + '\n')
 
         scheduler_warmup.step()    
-        if epoch==2: scheduler_warmup.step() # bug workaround   
+        if epoch==2: scheduler_warmup.step() 
 
         if auc > auc_max:
-            print('auc_max ({:.6f} --> {:.6f}). Saving model ...'.format(auc_max, auc))
+            print(f'auc_max ({auc_max:.6f} --> {auc:.6f}). Saving model & detail CSV...')
             torch.save(model.state_dict(), model_file)
             auc_max = auc
+            
+            # --- 處理精簡版 detail CSV 輸出 ---
+            id_col = df_valid.columns[0]
+            df_detail = pd.DataFrame({
+                'ID': df_valid[id_col].values,
+                'Actual': targets,
+                'Prediction': preds
+            })
+            df_detail.to_csv(os.path.join(args.log_dir, f'detail_{args.save_name}_best.csv'), index=False)
 
     torch.save(model.state_dict(), model_file2)
-
 
 def main():
 
