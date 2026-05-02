@@ -50,8 +50,3 @@ weights, logs</br>
 > git push origin describe_ur_request
 
 把describe_ur_request換成剛剛checkout -b 後面輸入的東西  
-
-
-
-
-

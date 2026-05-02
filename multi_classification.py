@@ -18,9 +18,9 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 os.environ['WANDB_CONSOLE'] = 'off'
 #Coloring for print outputs
 class color:
-   RED = '\033[91m'
-   BOLD = '\033[1m'
-   END = '\033[0m'
+  RED = '\033[91m'
+  BOLD = '\033[1m'
+  END = '\033[0m'
 
 
 class MultilabelClassifier(nn.Module):
@@ -153,8 +153,7 @@ def training(model, device, lr_rate,epochs, train_loader, wandb_flag=True):
               wandb.log({'train/training_loss': checkpoint_loss, 'epoch':epoch+1})
         if (i+1) % (int(n_total_steps/1)) == 0:
             n_correct,n_samples,n_class_correct,n_class_samples = validation(model, test_loader, len(images),
-                                                                             classes_hair_dense, classes_hair_short, classes_hair_medium,
-                                                                             classes_black_frame, classes_ruler_mark, classes_other)
+                                                                            classes_hair_dense, classes_hair_short, classes_hair_medium,classes_black_frame, classes_ruler_mark, classes_other)
             class_acc(n_correct, n_samples, n_class_correct, n_class_samples, class_list, wandb_flag)
         
   return checkpoint_losses, optimizer
