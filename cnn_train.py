@@ -21,8 +21,7 @@ import matplotlib.pyplot as plt
 
 # 確保你的目錄中有 cnn_models
 from dataset import get_df, get_transforms, MelanomaDataset
-from cnn_models import CNN_Melanoma
-
+from cnn_dnn_models import Multimodal_CNN_TextDNN
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--save-name', type=str, required=True)
@@ -34,6 +33,10 @@ def parse_args():
     parser.add_argument('--init-lr', type=float, default=3e-5)
     parser.add_argument('--out-dim', type=int, default=2)
     parser.add_argument('--n-epochs', type=int, default=20)
+    parser.add_argument('--use-text', action='store_true', help='是否啟用文字特徵 (DNN)')
+    parser.add_argument('--vocab-size', type=int, default=10000, help='文字字典大小')
+    parser.add_argument('--embed-dim', type=int, default=128, help='詞向量維度')
+    parser.add_argument('--text-hidden-dim', type=int, default=256, help='文字 DNN 隱藏層維度')
     parser.add_argument('--use-meta', action='store_true')
     parser.add_argument('--model-dir', type=str, default='./weights')
     parser.add_argument('--log-dir', type=str, default='./logs')
@@ -207,13 +210,13 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     valid_loader = torch.utils.data.DataLoader(
         dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
 
-    model = CNN_Melanoma(
-        cnn_type=args.enet_type, 
-        n_meta_features=n_meta_features,
-        n_meta_dim=[int(nd) for nd in args.n_meta_dim.split(',')],
-        out_dim=args.out_dim
-    ).to(device)
-
+    model = Multimodal_CNN_TextDNN(
+            cnn_type='resnet50', # 或是 'resnet18'
+            vocab_size=args.vocab_size,
+            embed_dim=args.embed_dim,
+            text_hidden_dim=args.text_hidden_dim,
+            out_dim=args.out_dim
+        ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.init_lr)
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)

@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 # 確保引用對應的檔案
 from dnn_dataset import get_df, get_transforms, MelanomaDataset
 # --- 修改 1: 匯入多模態模型 ---
-from models import Multimodal_EffNet_TextDNN
+from dnn_models import Multimodal_EffNet_TextDNN
 
 def parse_args():
     parser = argparse.ArgumentParser()
