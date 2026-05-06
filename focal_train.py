@@ -256,6 +256,7 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         # 紀錄 PR AUC 與 epoch 詳細指標
         p, r, _ = precision_recall_curve((targets == mel_idx).astype(float), probs[:, mel_idx])
         pr_auc = auc(r, p)
+        
 
         epoch_stat = {
             'Epoch': epoch,
