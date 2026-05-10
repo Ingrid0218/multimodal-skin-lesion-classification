@@ -205,12 +205,24 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
     return val_loss, acc, auc_val, report, report_str, TARGETS, PREDS, PROBS
 
 # --- 修改 5: 更新 run 函式的參數與模型實例化 ---
-def run(df_train, df_valid, transforms_train, transforms_val, mel_idx, device, criterion, args):
-
-    # 這裡移除了 meta_features，因為我們改為處理文字。
-    # 請確保你的 MelanomaDataset 內部已經改為回傳 (image, text_tokens)[cite: 5]
-    dataset_train = MelanomaDataset(df_train, 'train', transform=transforms_train)
-    dataset_valid = MelanomaDataset(df_valid, 'valid', transform=transforms_val)
+def run(df_train, df_valid, tokenizer, text_col, transforms_train, transforms_val, mel_idx, device, criterion, args):
+    
+    # --- 修正: 把文字相關的參數傳入 Dataset ---
+    dataset_train = MelanomaDataset(
+        df_train, 'train', 
+        use_text=args.use_text, 
+        text_col=text_col, 
+        tokenizer=tokenizer, 
+        transform=transforms_train
+    )
+    
+    dataset_valid = MelanomaDataset(
+        df_valid, 'valid', 
+        use_text=args.use_text, 
+        text_col=text_col, 
+        tokenizer=tokenizer, 
+        transform=transforms_val
+    )
     
     train_loader = torch.utils.data.DataLoader(
         dataset_train, batch_size=args.batch_size,
@@ -231,20 +243,28 @@ def run(df_train, df_valid, transforms_train, transforms_val, mel_idx, device, c
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)
     
+    # --- Early Stopping & 檔名同步設定 ---
+    patience = 10
+    early_stop_counter = 0
+    best_auc = 0.0
+    
     history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'val_auc': []}
     all_epochs_stats = []
-    auc_max = 0.
     
-    last_targets = None
-    last_probs = None
-
+    # 統一命名的路徑
     model_file  = os.path.join(args.model_dir, f'{args.save_name}_best.pth')
     model_file2 = os.path.join(args.model_dir, f'{args.save_name}_final.pth')
+    log_file_path = os.path.join(args.log_dir, f'{args.save_name}.txt')
+
+    last_targets = None
+    last_probs = None
 
     print(len(dataset_train), len(dataset_valid))
 
     for epoch in range(1, args.n_epochs + 1):
-        print(time.ctime(), f'Epoch {epoch}')
+        # 獲取當前 Learning Rate
+        current_lr = optimizer.param_groups[0]['lr']
+        print(time.ctime(), f'Epoch {epoch} | LR: {current_lr:.7f}')
         
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device, args)
         val_loss, acc, val_auc, report, report_str, targets, preds, probs = val_epoch(model, valid_loader, mel_idx, criterion, device, args)
@@ -262,6 +282,7 @@ def run(df_train, df_valid, transforms_train, transforms_val, mel_idx, device, c
 
         epoch_stat = {
             'Epoch': epoch,
+            'LR': current_lr,  # 新增 LR 紀錄
             'Train_Loss': train_loss,
             'Val_Loss': val_loss,
             'Total_Acc': acc,
@@ -276,22 +297,24 @@ def run(df_train, df_valid, transforms_train, transforms_val, mel_idx, device, c
         }
         all_epochs_stats.append(epoch_stat)
 
+        # 寫入同步命名的文字 Log
         content = f"[{time.ctime()}] Epoch {epoch}\n"
-        content += f"LR: {optimizer.param_groups[0]['lr']:.7f} | Train Loss: {train_loss:.5f} | Valid Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {val_auc:.6f}\n"
-        content += "Classification Report:\n" + report_str + "\n" + "="*60
+        content += f"LR: {current_lr:.7f} | Train Loss: {train_loss:.5f} | Valid Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {val_auc:.6f}\n"
+        content += "Classification Report:\n" + report_str + "\n" + "="*60 + "\n"
         print(content)
         
-        with open(os.path.join(args.log_dir, f'Full_Report_{args.save_name}.txt'), 'a') as f:
-            f.write(content + '\n')
+        with open(log_file_path, 'a') as f:
+            f.write(content)
 
-        scheduler_warmup.step()    
-        if epoch == 2: scheduler_warmup.step()
-
-        if val_auc > auc_max:
-            print(f'auc_max ({auc_max:.6f} --> {val_auc:.6f}). Saving Best Model & CSV...')
-            torch.save(model.state_dict(), model_file)
-            auc_max = val_auc
+        # --- Early Stopping & 最佳模型/CSV 存檔邏輯 ---
+        if val_auc > best_auc:
+            print(f'auc_max ({best_auc:.6f} --> {val_auc:.6f}). Saving Best Model & CSV...')
+            best_auc = val_auc
+            early_stop_counter = 0  # 重置計數器
             
+            torch.save(model.state_dict(), model_file)
+            
+            # 同步 CSV 命名
             id_col = df_valid.columns[0]
             df_detail = pd.DataFrame({
                 'ID': df_valid[id_col].values,
@@ -299,10 +322,20 @@ def run(df_train, df_valid, transforms_train, transforms_val, mel_idx, device, c
                 'Prediction': preds,
                 'Prob_Mel': probs[:, mel_idx]
             })
-            df_detail.to_csv(os.path.join(args.log_dir, f'detail_{args.save_name}_best.csv'), index=False)
+            df_detail.to_csv(os.path.join(args.log_dir, f'{args.save_name}_best_detail.csv'), index=False)
+        else:
+            early_stop_counter += 1
+            print(f'EarlyStopping 計數器: {early_stop_counter}/{patience}')
+            if early_stop_counter >= patience:
+                print(f"偵測到連續 {patience} 個 Epoch 未進步，提前停止訓練。")
+                break
+
+        scheduler_warmup.step()    
+        if epoch == 2: scheduler_warmup.step()
 
     torch.save(model.state_dict(), model_file2)
     
+    # 輸出同步命名的 Excel
     if all_epochs_stats:
         results_df = pd.DataFrame(all_epochs_stats)
         numeric_cols = results_df.select_dtypes(include=[np.number]).columns
@@ -310,7 +343,7 @@ def run(df_train, df_valid, transforms_train, transforms_val, mel_idx, device, c
         avg_row['Epoch'] = 'Average'
         results_df = pd.concat([results_df, pd.DataFrame([avg_row])], ignore_index=True)
         
-        excel_path = os.path.join(args.log_dir, f'metrics_{args.save_name}.xlsx')
+        excel_path = os.path.join(args.log_dir, f'{args.save_name}_metrics.xlsx')
         results_df.to_excel(excel_path, index=False)
         print(f"指標 Excel 已存至: {excel_path}")
 
@@ -327,12 +360,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     criterion = nn.CrossEntropyLoss()
 
-    # --- 修改 6: 修改取資料的方式 ---
-    # 你可能需要稍微調整 get_df 以處理文字資料，而不是原本的表格 Meta Data
-    # 這裡假設 get_df 依然能正確載入你的 DataFrame 並且找出標籤 index
-    df_train, df_test, _, _, mel_idx = get_df(
+    # --- 修正: 正確讀取 args.use_text，並接住 tokenizer 與 text_col ---
+    df_train, df_test, tokenizer, text_col, mel_idx = get_df(
         args.data_dir,
-        False # 不使用原本的 Meta 特徵提取
+        args.use_text  
     )
 
     transforms_train, transforms_val = get_transforms(args.image_size)
@@ -342,8 +373,8 @@ def main():
     df_train_sub = pd.DataFrame(train_split)
     df_valid_sub = pd.DataFrame(valid_split)
 
-    # 傳入 run 函式
-    run(df_train_sub, df_valid_sub, transforms_train, transforms_val, mel_idx, device, criterion, args)
+    # 傳入 run 函式 (多了 tokenizer 和 text_col)
+    run(df_train_sub, df_valid_sub, tokenizer, text_col, transforms_train, transforms_val, mel_idx, device, criterion, args)
 
 if __name__ == '__main__':
     main()
