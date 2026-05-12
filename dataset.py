@@ -37,7 +37,8 @@ class MelanomaDataset(Dataset):
         image = image.transpose(2, 0, 1)
 
         if self.use_meta:
-            data = (torch.tensor(image).float(), torch.tensor(self.csv.iloc[index][self.meta_features]).float())
+            meta_data = self.csv.iloc[index][self.meta_features].values.astype(np.float32)
+            data = (torch.tensor(image).float(), torch.tensor(meta_data).float())       
         else:
             data = torch.tensor(image).float()
 
@@ -135,10 +136,10 @@ def get_df(data_dir, use_meta):
     df_train = pd.read_csv(os.path.join(data_dir, 'train.csv'))
     df_train['filepath'] = df_train['image_name'].apply(lambda x: os.path.join(data_dir, f'train/train', f'{x}.jpg'))
 
-    # test data
+
+# test data
     df_test = pd.read_csv(os.path.join(data_dir, 'test.csv'))
     df_test['filepath'] = df_test['image_name'].apply(lambda x: os.path.join(data_dir, f'test/test', f'{x}.jpg'))
-
     if use_meta:
         df_train, df_test, meta_features, n_meta_features = get_meta_data(df_train, df_test)
     else:
