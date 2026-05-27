@@ -5,6 +5,8 @@
 # 排除權重與日誌資料夾
 weights/
 logs/
+2logs/
+backup_code/
 
 # 排除所有的訓練圖片檔 (防止大量小檔案上傳)
 *.jpg

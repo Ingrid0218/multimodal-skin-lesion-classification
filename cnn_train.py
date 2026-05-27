@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 # 確保你的目錄中有 cnn_models
 from dataset import get_df, get_transforms, MelanomaDataset
-from cnn_dnn_models import Multimodal_CNN_TextDNN
+from cnn_models import Multimodal_CNN_TextDNN
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--save-name', type=str, required=True)
@@ -211,30 +211,39 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
 
     model = Multimodal_CNN_TextDNN(
-            cnn_type='resnet50', # 或是 'resnet18'
+            cnn_type='resnet50', 
             vocab_size=args.vocab_size,
             embed_dim=args.embed_dim,
             text_hidden_dim=args.text_hidden_dim,
             out_dim=args.out_dim
         ).to(device)
+        
     optimizer = optim.Adam(model.parameters(), lr=args.init_lr)
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)
     
+    # --- Early Stopping & 檔名同步設定 ---
+    patience = 10
+    early_stop_counter = 0
+    best_auc = 0.0
+    
     history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'val_auc': []}
     all_epochs_stats = []
-    auc_max = 0.
     
-    last_targets = None
-    last_probs = None
-
+    # 統一命名的路徑
     model_file  = os.path.join(args.model_dir, f'{args.save_name}_best.pth')
     model_file2 = os.path.join(args.model_dir, f'{args.save_name}_final.pth')
+    log_file_path = os.path.join(args.log_dir, f'{args.save_name}.txt')
+
+    last_targets = None
+    last_probs = None
 
     print(len(dataset_train), len(dataset_valid))
 
     for epoch in range(1, args.n_epochs + 1):
-        print(time.ctime(), f'Epoch {epoch}')
+        # 獲取當前 Learning Rate
+        current_lr = optimizer.param_groups[0]['lr']
+        print(time.ctime(), f'Epoch {epoch} | LR: {current_lr:.7f}')
         
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device, args)
         val_loss, acc, val_auc, report, report_str, targets, preds, probs = val_epoch(model, valid_loader, mel_idx, criterion, device, args)
@@ -247,42 +256,40 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         history['val_acc'].append(acc)
         history['val_auc'].append(val_auc)
 
-        # 紀錄 PR AUC 與 epoch 詳細指標
+        # 紀錄 PR AUC 與詳細指標
         p, r, _ = precision_recall_curve((targets == mel_idx).astype(float), probs[:, mel_idx])
         pr_auc = auc(r, p)
 
         epoch_stat = {
             'Epoch': epoch,
+            'LR': current_lr,  # 新增 LR 紀錄
             'Train_Loss': train_loss,
             'Val_Loss': val_loss,
             'Total_Acc': acc,
-            'L0_Precision': report.get('0', {}).get('precision', 0),
-            'L0_Recall': report.get('0', {}).get('recall', 0),
-            'L0_F1': report.get('0', {}).get('f1-score', 0),
+            'ROC_AUC': val_auc,
+            'PR_AUC': pr_auc,
             'L1_Precision': report.get('1', {}).get('precision', 0),
             'L1_Recall': report.get('1', {}).get('recall', 0),
-            'L1_F1': report.get('1', {}).get('f1-score', 0),
-            'ROC_AUC': val_auc,
-            'PR_AUC': pr_auc
+            'L1_F1': report.get('1', {}).get('f1-score', 0)
         }
         all_epochs_stats.append(epoch_stat)
 
+        # 寫入同步命名的文字 Log
         content = f"[{time.ctime()}] Epoch {epoch}\n"
-        content += f"LR: {optimizer.param_groups[0]['lr']:.7f} | Train Loss: {train_loss:.5f} | Valid Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {val_auc:.6f}\n"
-        content += "Classification Report:\n" + report_str + "\n" + "="*60
-        print(content)
-        
-        with open(os.path.join(args.log_dir, f'Full_Report_{args.save_name}.txt'), 'a') as f:
-            f.write(content + '\n')
+        content += f"LR: {current_lr:.7f} | Train Loss: {train_loss:.5f} | Valid Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {val_auc:.6f}\n"
+        content += "Classification Report:\n" + report_str + "\n" + "="*60 + "\n"
+        with open(log_file_path, 'a') as f:
+            f.write(content)
 
-        scheduler_warmup.step()    
-        if epoch == 2: scheduler_warmup.step()
-
-        if val_auc > auc_max:
-            print(f'auc_max ({auc_max:.6f} --> {val_auc:.6f}). Saving Best Model & CSV...')
-            torch.save(model.state_dict(), model_file)
-            auc_max = val_auc
+        # --- Early Stopping & 最佳模型/CSV 存檔邏輯 ---
+        if val_auc > best_auc:
+            print(f'auc_max ({best_auc:.6f} --> {val_auc:.6f}). Saving Best Model & CSV...')
+            best_auc = val_auc
+            early_stop_counter = 0  # 重置計數器
             
+            torch.save(model.state_dict(), model_file)
+            
+            # 同步 CSV 命名
             id_col = df_valid.columns[0]
             df_detail = pd.DataFrame({
                 'ID': df_valid[id_col].values,
@@ -290,25 +297,30 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
                 'Prediction': preds,
                 'Prob_Mel': probs[:, mel_idx]
             })
-            df_detail.to_csv(os.path.join(args.log_dir, f'detail_{args.save_name}_best.csv'), index=False)
+            df_detail.to_csv(os.path.join(args.log_dir, f'{args.save_name}_best_detail.csv'), index=False)
+        else:
+            early_stop_counter += 1
+            print(f'EarlyStopping 計數器: {early_stop_counter}/{patience}')
+            if early_stop_counter >= patience:
+                print(f"偵測到連續 {patience} 個 Epoch 未進步，提前停止訓練。")
+                break
 
+        # 更新 Scheduler
+        scheduler_warmup.step()    
+        if epoch == 2: scheduler_warmup.step()
+
+    # 儲存最後一版模型
     torch.save(model.state_dict(), model_file2)
     
-    # 輸出訓練指標表格與總結圖片
+    # 輸出同步命名的 Excel
     if all_epochs_stats:
         results_df = pd.DataFrame(all_epochs_stats)
-        numeric_cols = results_df.select_dtypes(include=[np.number]).columns
-        avg_row = results_df[numeric_cols].mean().to_dict()
-        avg_row['Epoch'] = 'Average'
-        results_df = pd.concat([results_df, pd.DataFrame([avg_row])], ignore_index=True)
-        
-        excel_path = os.path.join(args.log_dir, f'metrics_{args.save_name}.xlsx')
+        excel_path = os.path.join(args.log_dir, f'{args.save_name}_metrics.xlsx')
         results_df.to_excel(excel_path, index=False)
         print(f"指標 Excel 已存至: {excel_path}")
 
-    if last_targets is not None and last_probs is not None:
+    if last_targets is not None:
         save_analysis_plots(history, last_targets, last_probs, mel_idx, args)
-
 def main():
     args = parse_args()
     os.makedirs(args.model_dir, exist_ok=True)
