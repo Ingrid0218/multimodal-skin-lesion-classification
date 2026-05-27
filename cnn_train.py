@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 # 確保你的目錄中有 cnn_models
 from dataset import get_df, get_transforms, MelanomaDataset
-from cnn_dnn_models import Multimodal_CNN_TextDNN
+from cnn_models import Multimodal_CNN_TextDNN
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--save-name', type=str, required=True)

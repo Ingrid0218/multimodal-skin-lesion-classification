@@ -20,10 +20,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # 確保引用對應的檔案
-from dnn_dataset import get_df, get_transforms, MelanomaDataset
-# --- 修改 1: 匯入多模態模型 ---
-from dnn_models import Multimodal_EffNet_TextDNN
+from dataset import get_df, get_transforms, MelanomaDataset
+from efn_mlp_product_models import Effnet_Melanoma
 
+'''
+model setting area
+'''
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--save-name', type=str, required=True)
@@ -35,19 +37,15 @@ def parse_args():
     parser.add_argument('--init-lr', type=float, default=3e-5)
     parser.add_argument('--out-dim', type=int, default=2)
     parser.add_argument('--n-epochs', type=int, default=20)
-    
-    # --- 修改 2: 新增文字 DNN 相關的參數 ---
-    parser.add_argument('--use-text', action='store_true', help='是否啟用文字特徵 (DNN)')
-    parser.add_argument('--vocab-size', type=int, default=10000, help='文字字典大小')
-    parser.add_argument('--embed-dim', type=int, default=128, help='詞向量維度')
-    parser.add_argument('--text-hidden-dim', type=int, default=256, help='文字 DNN 隱藏層維度')
-    
+    parser.add_argument('--use-meta', action='store_true')
     parser.add_argument('--model-dir', type=str, default='./weights')
     parser.add_argument('--log-dir', type=str, default='./logs')
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
-    parser.add_argument('--n-test', type=int, default=1) 
+    parser.add_argument('--n-meta-dim', type=str, default='512,128')
+    parser.add_argument('--n-test', type=int, default=1)
     args, _ = parser.parse_known_args()
     return args
+
 
 def set_seed(seed=0):
     random.seed(seed)
@@ -56,6 +54,7 @@ def set_seed(seed=0):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
+
 
 class GradualWarmupSchedulerV2(GradualWarmupScheduler):
     def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
@@ -73,6 +72,7 @@ class GradualWarmupSchedulerV2(GradualWarmupScheduler):
         else:
             return [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
 
+
 def get_trans(img, I):
     if I >= 4:
         img = img.transpose(2, 3)
@@ -87,8 +87,10 @@ def get_trans(img, I):
 
 def save_analysis_plots(history, val_targets, val_probs, mel_idx, args):
     """產出合併的分析圖片"""
+    plt.clf() # 清除當前圖像
     plt.figure(figsize=(15, 10))
     
+    # 1. Loss & Accuracy
     plt.subplot(2, 2, 1)
     plt.plot(history['train_loss'], label='Train Loss')
     plt.plot(history['val_loss'], label='Val Loss')
@@ -100,27 +102,28 @@ def save_analysis_plots(history, val_targets, val_probs, mel_idx, args):
     plt.title('Model Accuracy')
     plt.legend()
 
+    # 2. ROC Curve
+    from sklearn.metrics import roc_curve, auc
     plt.subplot(2, 2, 3)
-    from sklearn.metrics import roc_curve
     fpr, tpr, _ = roc_curve((val_targets == mel_idx).astype(float), val_probs[:, mel_idx])
-    plt.plot(fpr, tpr, color='darkorange', label=f'ROC curve (area = {auc(fpr, tpr):.4f})')
+    plt.plot(fpr, tpr, color='darkorange', label=f'ROC (AUC = {auc(fpr, tpr):.4f})')
     plt.plot([0, 1], [0, 1], color='navy', linestyle='--')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
     plt.title(f'ROC Curve (Class {mel_idx})')
     plt.legend()
 
+    # 3. Precision-Recall Curve
     plt.subplot(2, 2, 4)
     precision, recall, _ = precision_recall_curve((val_targets == mel_idx).astype(float), val_probs[:, mel_idx])
     plt.plot(recall, precision, color='blue', label=f'PR Curve (AUC = {auc(recall, precision):.4f})')
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
     plt.title(f'PR Curve (Class {mel_idx})')
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig(os.path.join(args.log_dir, f'analysis_{args.save_name}.png'))
-    print(f"分析圖表已存至: {args.log_dir}")
+    save_path = os.path.join(args.log_dir, f'analysis_{args.save_name}.png')
+    plt.savefig(save_path)
+    plt.close()
+    print(f"分析圖表已成功存至: {save_path}")
+
 
 def train_epoch(model, loader, optimizer, criterion, device, args):
     model.train()
@@ -129,17 +132,13 @@ def train_epoch(model, loader, optimizer, criterion, device, args):
     for (data, target) in bar:
         optimizer.zero_grad()
         
-        # --- 修改 3: 處理影像與文字的雙輸入邏輯 ---
-        if args.use_text:
-            # 假設 Dataset 會將 data 包裝成 (images, texts) 的 Tuple 返回
-            images, texts = data
-            images, texts, target = images.to(device), texts.to(device), target.to(device)
-            logits = model(images, texts)
+        if args.use_meta:
+            data, meta = data
+            data, meta, target = data.to(device), meta.to(device), target.to(device)
+            logits = model(data, meta)
         else:
             data, target = data.to(device), target.to(device)
-            # 如果沒有啟用文字，可以修改模型或這裡傳入一個 dummy_text，視你的 Dataset 實作而定
-            # 這裡假設如果不用文字，只傳影像 (需確保模型支援單一輸入，或提供空的 tensor)
-            logits = model(data, None)        
+            logits = model(data)        
         
         loss = criterion(logits, target)
         loss.backward()
@@ -155,6 +154,7 @@ def train_epoch(model, loader, optimizer, criterion, device, args):
 
     return np.mean(train_loss)
 
+
 def val_epoch(model, loader, mel_idx, criterion, device, args):
     model.eval()
     val_loss = []
@@ -162,15 +162,13 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
     TARGETS = []
     with torch.no_grad():
         for (data, target) in tqdm(loader):
-            # --- 修改 4: 處理驗證集的多模態 TTA (Test Time Augmentation) 邏輯 ---
-            if args.use_text:
-                images, texts = data
-                images, texts, target = images.to(device), texts.to(device), target.to(device)
-                logits = torch.zeros((images.shape[0], args.out_dim)).to(device)
-                probs = torch.zeros((images.shape[0], args.out_dim)).to(device)
+            if args.use_meta:
+                data, meta = data
+                data, meta, target = data.to(device), meta.to(device), target.to(device)
+                logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
+                probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
                 for I in range(args.n_test):
-                    # 將影像做翻轉轉換，文字特徵保持不變
-                    l = model(get_trans(images, I), texts)
+                    l = model(get_trans(data, I), meta)
                     logits += l
                     probs += l.softmax(1)
             else:
@@ -178,7 +176,7 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
                 logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
                 probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
                 for I in range(args.n_test):
-                    l = model(get_trans(data, I), None)
+                    l = model(get_trans(data, I))
                     logits += l
                     probs += l.softmax(1)
             
@@ -199,43 +197,27 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
     acc = (PREDS == TARGETS).mean()
     auc_val = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
     
+    # 取得詳細 report 字典與純文字字串
     report = classification_report(TARGETS, PREDS, output_dict=True, zero_division=0)
     report_str = classification_report(TARGETS, PREDS, digits=4, zero_division=0)
 
     return val_loss, acc, auc_val, report, report_str, TARGETS, PREDS, PROBS
 
-# --- 修改 5: 更新 run 函式的參數與模型實例化 ---
-def run(df_train, df_valid, tokenizer, text_col, transforms_train, transforms_val, mel_idx, device, criterion, args):
-    
-    # --- 修正: 把文字相關的參數傳入 Dataset ---
-    dataset_train = MelanomaDataset(
-        df_train, 'train', 
-        use_text=args.use_text, 
-        text_col=text_col, 
-        tokenizer=tokenizer, 
-        transform=transforms_train
-    )
-    
-    dataset_valid = MelanomaDataset(
-        df_valid, 'valid', 
-        use_text=args.use_text, 
-        text_col=text_col, 
-        tokenizer=tokenizer, 
-        transform=transforms_val
-    )
-    
+
+def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, transforms_val, mel_idx, device, criterion, args):
+
+    dataset_train = MelanomaDataset(df_train, 'train', meta_features, transform=transforms_train)
+    dataset_valid = MelanomaDataset(df_valid, 'valid', meta_features, transform=transforms_val)
     train_loader = torch.utils.data.DataLoader(
         dataset_train, batch_size=args.batch_size,
         sampler=RandomSampler(dataset_train), num_workers=args.num_workers)
     valid_loader = torch.utils.data.DataLoader(
         dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
 
-    # 實例化多模態模型 (Image EFN + Text DNN)
-    model = Multimodal_EffNet_TextDNN(
-        enet_type=args.enet_type,
-        vocab_size=args.vocab_size,
-        embed_dim=args.embed_dim,
-        text_hidden_dim=args.text_hidden_dim,
+    model = Effnet_Melanoma(
+        args.enet_type,
+        n_meta_features=n_meta_features,
+        n_meta_dim=[int(nd) for nd in args.n_meta_dim.split(',')],
         out_dim=args.out_dim
     ).to(device)
 
@@ -277,12 +259,13 @@ def run(df_train, df_valid, tokenizer, text_col, transforms_train, transforms_va
         history['val_acc'].append(acc)
         history['val_auc'].append(val_auc)
 
+        # 紀錄 PR AUC 與 epoch 詳細指標
         p, r, _ = precision_recall_curve((targets == mel_idx).astype(float), probs[:, mel_idx])
         pr_auc = auc(r, p)
 
         epoch_stat = {
             'Epoch': epoch,
-            'LR': current_lr,  # 新增 LR 紀錄
+            'LR': current_lr,
             'Train_Loss': train_loss,
             'Val_Loss': val_loss,
             'Total_Acc': acc,
@@ -347,8 +330,10 @@ def run(df_train, df_valid, tokenizer, text_col, transforms_train, transforms_va
         results_df.to_excel(excel_path, index=False)
         print(f"指標 Excel 已存至: {excel_path}")
 
+    # 產出分析圖
     if last_targets is not None and last_probs is not None:
         save_analysis_plots(history, last_targets, last_probs, mel_idx, args)
+
 
 def main():
     args = parse_args()
@@ -360,10 +345,9 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     criterion = nn.CrossEntropyLoss()
 
-    # --- 修正: 正確讀取 args.use_text，並接住 tokenizer 與 text_col ---
-    df_train, df_test, tokenizer, text_col, mel_idx = get_df(
+    df_train, df_test, meta_features, n_meta_features, mel_idx = get_df(
         args.data_dir,
-        args.use_text  
+        args.use_meta
     )
 
     transforms_train, transforms_val = get_transforms(args.image_size)
@@ -373,8 +357,9 @@ def main():
     df_train_sub = pd.DataFrame(train_split)
     df_valid_sub = pd.DataFrame(valid_split)
 
-    # 傳入 run 函式 (多了 tokenizer 和 text_col)
-    run(df_train_sub, df_valid_sub, tokenizer, text_col, transforms_train, transforms_val, mel_idx, device, criterion, args)
+    run(df_train_sub, df_valid_sub, meta_features, n_meta_features, 
+        transforms_train, transforms_val, mel_idx, device, criterion, args)
+
 
 if __name__ == '__main__':
     main()
