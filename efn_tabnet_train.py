@@ -21,7 +21,8 @@ import matplotlib.pyplot as plt
 
 # 確保引用對應的檔案
 from dataset import get_df, get_transforms, MelanomaDataset
-from efn_tabnet_models import Effnet_Melanoma
+# 引入設計好的 TabNet 整合模型
+from efn_tabnet_models import TabNetStyleMeta
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -39,6 +40,7 @@ def parse_args():
     parser.add_argument('--log-dir', type=str, default='./logs')
     parser.add_argument('--CUDA_VISIBLE_DEVICES', type=str, default='0')
     parser.add_argument('--n-meta-dim', type=str, default='512,128')
+    parser.add_argument('--cnn-out-channels', type=int, default=32, help='1D-CNN 的輸出通道數 (TabNet 架構下會自動忽略)')
     parser.add_argument('--n-test', type=int, default=1) 
     parser.add_argument('--patience', type=int, default=10)
     args, _ = parser.parse_known_args()
@@ -130,7 +132,7 @@ def train_epoch(model, loader, optimizer, criterion, device, args):
         if args.use_meta:
             data, meta = data
             data, meta, target = data.to(device), meta.to(device), target.to(device)
-            logits = model(data, meta)
+            logits = model(data, meta.float())
         else:
             data, target = data.to(device), target.to(device)
             logits = model(data)        
@@ -138,7 +140,7 @@ def train_epoch(model, loader, optimizer, criterion, device, args):
         loss = criterion(logits, target)
         loss.backward()
 
-        if args.image_size in [896,576]:
+        if args.image_size in [896, 576]:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
 
@@ -162,7 +164,7 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
                 logits = torch.zeros((data.shape[0], args.out_dim)).to(device)
                 probs = torch.zeros((data.shape[0], args.out_dim)).to(device)
                 for I in range(args.n_test):
-                    l = model(get_trans(data, I), meta)
+                    l = model(get_trans(data, I), meta.float())
                     logits += l
                     probs += l.softmax(1)
             else:
@@ -189,16 +191,18 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
     PREDS = PROBS.argmax(1)
 
     acc = (PREDS == TARGETS).mean()
-    auc_val = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
     
-    # 取得詳細 report 字典與純文字字串
+    try:
+        auc_val = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
+    except Exception:
+        auc_val = 0.5
+    
     report = classification_report(TARGETS, PREDS, output_dict=True, zero_division=0)
     report_str = classification_report(TARGETS, PREDS, digits=4, zero_division=0)
 
     return val_loss, acc, auc_val, report, report_str, TARGETS, PREDS, PROBS
 
 def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, transforms_val, mel_idx, device, criterion, args):
-    # --- Dataset & DataLoader 初始化 ---
     dataset_train = MelanomaDataset(df_train, 'train', meta_features, transform=transforms_train)
     dataset_valid = MelanomaDataset(df_valid, 'valid', meta_features, transform=transforms_val)
     train_loader = torch.utils.data.DataLoader(
@@ -207,20 +211,19 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     valid_loader = torch.utils.data.DataLoader(
         dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
 
-    # --- 模型與優化器設定 ---
-    model = Effnet_Melanoma(
-        args.enet_type,
+    # --- 這裡替換為全新的 TabNet 整合模型 ---
+    model = TabNetStyleMeta(
+        enet_type=args.enet_type,
+        out_dim=args.out_dim,
         n_meta_features=n_meta_features,
         n_meta_dim=[int(nd) for nd in args.n_meta_dim.split(',')],
-        out_dim=args.out_dim
+        cnn_out_channels=args.cnn_out_channels
     ).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.init_lr)
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.n_epochs - 1)
     scheduler_warmup = GradualWarmupSchedulerV2(optimizer, multiplier=10, total_epoch=1, after_scheduler=scheduler_cosine)
     
-    # --- Early Stopping & 檔名同步設定 ---
-    patience = 10
     early_stop_counter = 0
     best_auc = 0.0
     
@@ -231,20 +234,23 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     log_file_path = os.path.join(args.log_dir, f'{args.save_name}.txt')
 
     for epoch in range(1, args.n_epochs + 1):
-        # 獲取當前 Learning Rate
         current_lr = optimizer.param_groups[0]['lr']
         print(time.ctime(), f'Epoch {epoch} | LR: {current_lr:.7f}')
         
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device, args)
         val_loss, acc, val_auc, report, report_str, targets, preds, probs = val_epoch(model, valid_loader, mel_idx, criterion, device, args)
 
-        # 1. 在 Excel 統計資料中加入 LR
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(acc)
+        history['val_auc'].append(val_auc)
+
         p, r, _ = precision_recall_curve((targets == mel_idx).astype(float), probs[:, mel_idx])
         pr_auc = auc(r, p)
 
         epoch_stat = {
             'Epoch': epoch,
-            'LR': current_lr,  # <--- 新增此欄位
+            'LR': current_lr,  
             'Train_Loss': train_loss,
             'Val_Loss': val_loss,
             'Total_Acc': acc,
@@ -256,20 +262,17 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         }
         all_epochs_stats.append(epoch_stat)
 
-        # 2. 在 .txt Log 中加入 LR
         content = f"[{time.ctime()}] Epoch {epoch}\n"
         content += f"LR: {current_lr:.7f} | Train Loss: {train_loss:.5f} | Val Loss: {val_loss:.5f} | Acc: {acc:.4f} | AUC: {val_auc:.6f}\n"
         content += report_str + "\n" + "="*60 + "\n"
         with open(log_file_path, 'a') as f:
             f.write(content)
 
-        # --- Early Stopping & 最佳模型存檔 ---
         if val_auc > best_auc:
             best_auc = val_auc
             early_stop_counter = 0
             torch.save(model.state_dict(), model_file)
             
-            # 儲存詳細 CSV
             df_detail = pd.DataFrame({
                 'ID': df_valid[df_valid.columns[0]].values,
                 'Actual': targets,
@@ -279,15 +282,18 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
             df_detail.to_csv(os.path.join(args.log_dir, f'{args.save_name}_best_detail.csv'), index=False)
         else:
             early_stop_counter += 1
-            if early_stop_counter >= patience:
-                print(f"指標已連續 {patience} 次未進步，提前停止。")
+            if early_stop_counter >= args.patience:
+                print(f"指標已連續 {args.patience} 次未進步，提前停止。")
                 break
 
-        # 更新 Scheduler
         scheduler_warmup.step()    
         if epoch == 2: scheduler_warmup.step()
 
-    # --- 輸出 Excel ---
+    try:
+        save_analysis_plots(history, targets, probs, mel_idx, args)
+    except Exception as e:
+        print(f"繪製分析圖表時發生錯誤: {e}")
+
     if all_epochs_stats:
         results_df = pd.DataFrame(all_epochs_stats)
         excel_path = os.path.join(args.log_dir, f'{args.save_name}_metrics.xlsx')
