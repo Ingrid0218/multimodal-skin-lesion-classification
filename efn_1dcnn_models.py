@@ -35,25 +35,20 @@ class Effnet_Melanoma(nn.Module):
         
         if n_meta_features > 0:
             # 1. 原始的 MLP 基礎特徵提取
-            self.meta_mlp = nn.Sequential(
-                nn.Linear(n_meta_features, n_meta_dim[0]),
-                nn.BatchNorm1d(n_meta_dim[0]),
-                Swish_Module(),
-                nn.Dropout(p=0.3),
-                nn.Linear(n_meta_dim[0], n_meta_dim[1]),
-                nn.BatchNorm1d(n_meta_dim[1]),
-                Swish_Module(),
-            )
-            
-            # 2. 新增的 1D-CNN 層 (把 MLP 的特徵序列化，捕捉特徵間的局部關聯)
-            # 輸入通道為 1 (因為我們將特徵 shape 轉為 [Batch, 1, n_meta_dim[1]])
             self.meta_cnn = nn.Sequential(
-                nn.Conv1d(in_channels=1, out_channels=cnn_out_channels, kernel_size=3, padding=1),
+                # 第一層卷積：輸入通道為 1 (將原始 Meta 特徵當作長度為 n_meta_features 的序列)
+                nn.Conv1d(in_channels=1, out_channels=64, kernel_size=3, padding=1),
+                nn.BatchNorm1d(64),
+                Swish_Module(),
+                
+                # 第二層卷積：進一步提煉序列特徵並輸出指定的 cnn_out_channels
+                nn.Conv1d(in_channels=64, out_channels=cnn_out_channels, kernel_size=3, padding=1),
                 nn.BatchNorm1d(cnn_out_channels),
                 Swish_Module(),
-                nn.AdaptiveAvgPool1d(1) # 動態池化，將序列長度壓縮到 1
+                
+                # 全局平均池化：將序列長度壓縮到 1，確保不論特徵數多少，輸出形狀皆固定
+                nn.AdaptiveAvgPool1d(1) 
             )
-            
             # 最終 Meta 特徵的輸出維度就是 CNN 的輸出通道數
             in_ch += cnn_out_channels
             
@@ -69,25 +64,25 @@ class Effnet_Melanoma(nn.Module):
         x = self.extract(x).squeeze(-1).squeeze(-1)
         
         if self.n_meta_features > 0:
-            # Step A: 透過 MLP 提取特徵 -> (Batch_Size, n_meta_dim[1])
-            x_meta = self.meta_mlp(x_meta)
-            
-            # Step B: 擴展維度以符合 1D-CNN 輸入要求 -> (Batch_Size, 1, n_meta_dim[1])
+            # 【修改重點】Meta Data 資料流簡化
+            # Step A: 直接擴展維度符合 1D-CNN 輸入要求 -> (Batch_Size, 1, n_meta_features)
             x_meta = x_meta.unsqueeze(1)
             
-            # Step C: 通過 1D-CNN + Pool -> (Batch_Size, cnn_out_channels, 1)
+            # Step B: 直接通過純 1D-CNN 架構 -> (Batch_Size, cnn_out_channels, 1)
             x_meta = self.meta_cnn(x_meta)
             
-            # Step D: 壓平維度 -> (Batch_Size, cnn_out_channels)
+            # Step C: 壓平最後一維 -> (Batch_Size, cnn_out_channels)
             x_meta = x_meta.squeeze(-1)
             
-            # Step E: 將影像特徵與 1D-CNN 混合 Meta 特徵拼接
+            # Step D: 將影像特徵與純 1D-CNN 提煉出的 Meta 特徵拼接
             x = torch.cat((x, x_meta), dim=1)
             
+        # 執行 Multi-sample Dropout 輸出最終結果
         for i, dropout in enumerate(self.dropouts):
             if i == 0:
                 out = self.myfc(dropout(x))
             else:
                 out += self.myfc(dropout(x))
         out /= len(self.dropouts)
+        
         return out
