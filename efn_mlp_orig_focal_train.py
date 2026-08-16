@@ -7,22 +7,24 @@ import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import (
     roc_auc_score, precision_recall_curve, auc, 
-    classification_report, confusion_matrix
+    classification_report, roc_curve
 )
+from sklearn.model_selection import train_test_split
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data.sampler import RandomSampler
-from warmup_scheduler import GradualWarmupScheduler
-from sklearn.model_selection import train_test_split
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# 確保引用對應的檔案
+# 導入自訂模組與數據處理
 from dataset import get_df, get_transforms, MelanomaDataset
 from focal_loss.focal_loss import FocalLoss
-from models import Effnet_Melanoma
+from models import Effnet_Melanoma, GradualWarmupSchedulerV2
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -44,6 +46,7 @@ def parse_args():
     args, _ = parser.parse_known_args()
     return args
 
+
 def set_seed(seed=0):
     random.seed(seed)
     np.random.seed(seed)
@@ -52,23 +55,9 @@ def set_seed(seed=0):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
 
-class GradualWarmupSchedulerV2(GradualWarmupScheduler):
-    def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
-        super(GradualWarmupSchedulerV2, self).__init__(optimizer, multiplier, total_epoch, after_scheduler)
-    def get_lr(self):
-        if self.last_epoch > self.total_epoch:
-            if self.after_scheduler:
-                if not self.finished:
-                    self.after_scheduler.base_lrs = [base_lr * self.multiplier for base_lr in self.base_lrs]
-                    self.finished = True
-                return self.after_scheduler.get_lr()
-            return [base_lr * self.multiplier for base_lr in self.base_lrs]
-        if self.multiplier == 1.0:
-            return [base_lr * (float(self.last_epoch) / self.total_epoch) for base_lr in self.base_lrs]
-        else:
-            return [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
 
 def get_trans(img, I):
+    """TTA (Test-Time Augmentation) 圖像旋轉與翻轉變換"""
     if I >= 4:
         img = img.transpose(2, 3)
     if I % 4 == 0:
@@ -80,8 +69,9 @@ def get_trans(img, I):
     elif I % 4 == 3:
         return img.flip(2).flip(3)
 
+
 def save_analysis_plots(history, val_targets, val_probs, mel_idx, args):
-    """產出合併的分析圖片"""
+    """產出合併的分析圖表"""
     plt.figure(figsize=(15, 10))
     
     # 1. Loss & Accuracy
@@ -98,7 +88,6 @@ def save_analysis_plots(history, val_targets, val_probs, mel_idx, args):
 
     # 2. ROC Curve
     plt.subplot(2, 2, 3)
-    from sklearn.metrics import roc_curve
     fpr, tpr, _ = roc_curve((val_targets == mel_idx).astype(float), val_probs[:, mel_idx])
     plt.plot(fpr, tpr, color='darkorange', label=f'ROC curve (area = {auc(fpr, tpr):.4f})')
     plt.plot([0, 1], [0, 1], color='navy', linestyle='--')
@@ -120,28 +109,26 @@ def save_analysis_plots(history, val_targets, val_probs, mel_idx, args):
     plt.savefig(os.path.join(args.log_dir, f'analysis_{args.save_name}.png'))
     print(f"分析圖表已存至: {args.log_dir}")
 
+
 def train_epoch(model, loader, optimizer, criterion, device, args):
     model.train()
     train_loss = []
     bar = tqdm(loader)
     
-    # 統一標準化的解包方式，符合 dataset.py 格式
     for (data, target) in bar:
         optimizer.zero_grad()
         
         if args.use_meta:
             data, meta = data
             data, meta = data.to(device), meta.to(device)
-            target = target.to(device).long() # FocalLoss 需要 long 格式[cite: 4]
+            target = target.to(device).long()
             logits = model(data, meta)
         else:
             data = data.to(device)
             target = target.to(device).long()
             logits = model(data)        
         
-        # [Focal Loss 修正] 先計算 probs
         probs = torch.softmax(logits, dim=-1)
-        
         loss = criterion(probs, target)
         loss.backward()
 
@@ -155,6 +142,7 @@ def train_epoch(model, loader, optimizer, criterion, device, args):
         bar.set_description('loss: %.5f, smth: %.5f' % (loss_np, smooth_loss))
 
     return np.mean(train_loss)
+
 
 def val_epoch(model, loader, mel_idx, criterion, device, args):
     model.eval()
@@ -189,7 +177,6 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
             PROBS.append(probs.cpu())
             TARGETS.append(target.cpu())
 
-            # [Focal Loss 修正] 直接傳入計算好且平均過的 probs[cite: 4]
             loss = criterion(probs, target)
             val_loss.append(loss.item())
 
@@ -201,11 +188,11 @@ def val_epoch(model, loader, mel_idx, criterion, device, args):
     acc = (PREDS == TARGETS).mean()
     auc_val = roc_auc_score((TARGETS == mel_idx).astype(float), PROBS[:, mel_idx])
     
-    # 取得詳細 report 字典與純文字字串
     report = classification_report(TARGETS, PREDS, output_dict=True, zero_division=0)
     report_str = classification_report(TARGETS, PREDS, digits=4, zero_division=0)
 
     return val_loss, acc, auc_val, report, report_str, TARGETS, PREDS, PROBS
+
 
 def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, transforms_val, mel_idx, device, criterion, args):
     dataset_train = MelanomaDataset(df_train, 'train', meta_features, transform=transforms_train)
@@ -253,11 +240,9 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
         history['val_acc'].append(acc)
         history['val_auc'].append(val_auc)
 
-        # 紀錄 PR AUC 與 epoch 詳細指標
         p, r, _ = precision_recall_curve((targets == mel_idx).astype(float), probs[:, mel_idx])
         pr_auc = auc(r, p)
         
-
         epoch_stat = {
             'Epoch': epoch,
             'Train_Loss': train_loss,
@@ -301,7 +286,6 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
 
     torch.save(model.state_dict(), model_file2)
     
-    # 輸出訓練指標表格與總結圖片
     if all_epochs_stats:
         results_df = pd.DataFrame(all_epochs_stats)
         numeric_cols = results_df.select_dtypes(include=[np.number]).columns
@@ -316,6 +300,7 @@ def run(df_train, df_valid, meta_features, n_meta_features, transforms_train, tr
     if last_targets is not None and last_probs is not None:
         save_analysis_plots(history, last_targets, last_probs, mel_idx, args)
 
+
 def main():
     args = parse_args()
     os.makedirs(args.model_dir, exist_ok=True)
@@ -325,7 +310,6 @@ def main():
     set_seed()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # FocalLoss 初始化設定
     weights = torch.FloatTensor([1.0, 5.0]).to(device)
     criterion = FocalLoss(gamma=2.0, weights=weights)
     df_train, df_test, meta_features, n_meta_features, mel_idx = get_df(
@@ -342,6 +326,7 @@ def main():
 
     run(df_train_sub, df_valid_sub, meta_features, n_meta_features, 
         transforms_train, transforms_val, mel_idx, device, criterion, args)
+
 
 if __name__ == '__main__':
     main()
