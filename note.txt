@@ -1,5 +1,0 @@
- /home/wangryan12345/.cache/kagglehub/datasets/nischaydnk/isic-2020-jpg-224x224-resized/versions/1/train-image/
- mv  /home/wangryan12345/multimodal-skin-lesion-classification/melanoma_external_256/tra/ /home/wangryan12345/multimodal-skin-lesion-classification/melanoma_external_256/train/
-
-
-python focal_train.py --save-name efficientnetb2_256_20ep --data-dir ./melanoma_external_256/ --image-size 256 --n-epochs 20 --enet-type efficientnet-b0 --CUDA_VISIBLE_DEVICES 0; sudo prweroff
