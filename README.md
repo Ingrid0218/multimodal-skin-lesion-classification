@@ -1,11 +1,11 @@
-# 探討不同多模態架構於黑色素瘤預測效能之比較
+## 探討不同多模態架構於黑色素瘤預測效能之比較
 
 以 ISIC 2020 資料集結合**皮膚影像**與**臨床資料**（年齡、性別、病灶部位），透過四階段控制實驗，比較各架構元件對黑色素瘤辨識的影響。
 
 > 國立彰化師範大學資訊管理學系畢業專題｜獲彰師大百萬專題探索計畫支持｜TAAI 2026 投稿中
 > 本 repo fork 自團隊原始專案 [thefirstwangry/multimodal-skin-lesion-classification](https://github.com/thefirstwangry/multimodal-skin-lesion-classification)，並整理檔案、補充說明文件。
 
-## 研究架構
+### 研究架構
 
 ![研究架構圖](architecture.png)
 
@@ -20,7 +20,7 @@
 | 3 | 特徵融合方式 | Ori-concat、Attention-based、Product-based |
 | 4 | 損失函數 | Cross-Entropy、Focal Loss、Weighted Cross-Entropy |
 
-## 實驗結果
+### 實驗結果
 
 最終架構為 **EfficientNet + MLP + Ori-concat + Focal Loss**。
 
@@ -37,7 +37,7 @@
 - 較複雜的 Attention 與 Product 融合，在惡性 Recall 上並未優於直接串接（Ori-concat）。
 - Focal Loss 能大幅提升惡性 Recall，但會犧牲部分 Accuracy 與 F1-score；經 Optuna 優化後，F1-score 回升至 0.2516。
 
-## 程式對照
+### 程式對照
 
 | 階段 | 實驗 | 訓練程式 | 模型定義 |
 |---|---|---|---|
@@ -54,11 +54,11 @@
 - `dataset.py`：共用的資料讀取與影像增強
 - `multi_classification.py`、`efn_mlp_atten_multi_classification.py`：模型評估
 
-## 使用技術
+### 使用技術
 
 Python、PyTorch、EfficientNet、TabNet、Optuna、Albumentations、scikit-learn
 
-## 執行方式
+### 執行方式
 
 1. 依 `pytorch_conda.yml` 建立環境（Python 3.10、PyTorch 2.5.1、CUDA 12.1）。
 2. 下載影像資料集 [ISIC 2020 JPG 224x224 Resized](https://www.kaggle.com/datasets/nischaydnk/isic-2020-jpg-224x224-resized)，放到 `melanoma_external_256/train/`。
@@ -68,7 +68,7 @@ Python、PyTorch、EfficientNet、TabNet、Optuna、Albumentations、scikit-lear
 python efn_mlp_orig_focal_train.py --save-name final_focal --data-dir ./melanoma_external_256/ --image-size 256 --enet-type efficientnet-b0 --use-meta
 ```
 
-## 資料來源
+### 資料來源
 
 - 原始資料：[ISIC 2020 Challenge Dataset](https://challenge2020.isic-archive.com/)（International Skin Imaging Collaboration），請依其授權條款使用。
 - `melanoma_external_256/` 中的 CSV 為資料集的臨床資料與標籤，影像檔需另外下載。
