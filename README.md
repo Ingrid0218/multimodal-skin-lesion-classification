@@ -2,7 +2,7 @@
 
 以 ISIC 2020 資料集結合**皮膚影像**與**臨床資料**（年齡、性別、病灶部位），透過四階段控制實驗，比較各架構元件對黑色素瘤辨識的影響。
 
-> 國立彰化師範大學資訊管理學系畢業專題｜獲彰師大百萬專題探索計畫支持｜已被 TAAI 2026 接受為海報發表
+> 國立彰化師範大學資訊管理學系畢業專題｜獲彰師大百萬專題探索計畫支持｜已被 TAAI 2026 接受海報發表
 > 本 repo fork 自團隊原始專案 [thefirstwangry/multimodal-skin-lesion-classification](https://github.com/thefirstwangry/multimodal-skin-lesion-classification)，並整理檔案、補充說明文件。
 
 ### 研究架構
